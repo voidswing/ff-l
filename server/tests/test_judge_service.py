@@ -1,4 +1,7 @@
 import asyncio
+from io import BytesIO
+
+from fastapi import UploadFile
 
 from src.feature.judge import service
 
@@ -46,3 +49,25 @@ def test_judge_story_without_api_key_returns_fallback() -> None:
     assert result.possible_crimes == []
     assert "모의 판단" in result.verdict
     assert "법률 자문" in result.disclaimer
+
+
+def test_build_evidence_context_rejects_unsupported_file_extension() -> None:
+    evidence_file = UploadFile(filename="malware.exe", file=BytesIO(b"dummy"))
+
+    try:
+        asyncio.run(service.build_evidence_context([evidence_file]))
+    except service.EvidenceValidationError as exc:
+        assert "지원하지 않는 파일 형식" in str(exc)
+    else:
+        raise AssertionError("EvidenceValidationError was not raised for unsupported extension")
+
+
+def test_build_evidence_context_allows_pdf_and_image() -> None:
+    image_file = UploadFile(filename="photo.jpg", file=BytesIO(b"image-bytes"))
+    pdf_file = UploadFile(filename="document.pdf", file=BytesIO(b"%PDF-1.4"))
+
+    context = asyncio.run(service.build_evidence_context([image_file, pdf_file]))
+
+    assert len(context) == 2
+    assert "photo.jpg" in context[0]
+    assert "document.pdf" in context[1]

@@ -3,7 +3,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
 from src.core.config import settings
+from src.core.db.connection import init_db
 from src.feature.judge.router import router as judge_router
+from src.feature.user.router import router as user_router
 
 load_dotenv()
 
@@ -13,6 +15,11 @@ app = FastAPI(
     version="0.1.0",
     swagger_ui_parameters={"defaultModelsExpandDepth": -1},
 )
+
+
+@app.on_event("startup")
+async def on_startup() -> None:
+    init_db()
 
 app.add_middleware(
     CORSMiddleware,
@@ -29,3 +36,4 @@ async def health_check():
 
 
 app.include_router(judge_router, prefix="/api")
+app.include_router(user_router, prefix="/api")

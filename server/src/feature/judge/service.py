@@ -1,6 +1,10 @@
 import json
+import os
+from collections.abc import Sequence
 from functools import lru_cache
 from typing import Any
+
+from fastapi import UploadFile
 
 from openai import AsyncOpenAI
 
@@ -8,6 +12,9 @@ from src.core.config import settings
 from src.feature.judge.schemas import JudgmentResponse
 
 SUMMARY_MAX_CHARS = 140
+EVIDENCE_MAX_FILES = 3
+EVIDENCE_MAX_FILE_BYTES = 8 * 1024 * 1024
+ALLOWED_EVIDENCE_EXTENSIONS = {"jpg", "jpeg", "png", "webp", "gif", "bmp", "heic", "heif", "pdf"}
 
 SYSTEM_PROMPT = """
 너는 한국어로 답하는 'AI 판사'야.
@@ -30,11 +37,78 @@ SYSTEM_PROMPT = """
 """.strip()
 
 
+class EvidenceValidationError(ValueError):
+    pass
+
+
 def _short_story(story: str) -> str:
     normalized = story.strip()
     if not normalized:
         return "입력된 사연이 없습니다."
     return normalized[:SUMMARY_MAX_CHARS] + ("..." if len(normalized) > SUMMARY_MAX_CHARS else "")
+
+
+def _sanitize_filename(filename: str | None) -> str:
+    normalized = (filename or "").replace("\\", "/").strip()
+    if not normalized:
+        return "unnamed"
+    return normalized.split("/")[-1] or "unnamed"
+
+
+def _extract_extension(filename: str) -> str:
+    _, extension = os.path.splitext(filename)
+    return extension.lower().lstrip(".")
+
+
+async def build_evidence_context(evidence_files: Sequence[UploadFile] | None) -> list[str]:
+    files = list(evidence_files or [])
+    if len(files) > EVIDENCE_MAX_FILES:
+        raise EvidenceValidationError(f"증거 파일은 최대 {EVIDENCE_MAX_FILES}개까지 업로드할 수 있습니다.")
+
+    context_lines: list[str] = []
+    try:
+        for index, evidence_file in enumerate(files, start=1):
+            filename = _sanitize_filename(evidence_file.filename)
+            extension = _extract_extension(filename)
+            if extension not in ALLOWED_EVIDENCE_EXTENSIONS:
+                raise EvidenceValidationError(f"지원하지 않는 파일 형식입니다: {filename}")
+
+            raw = await evidence_file.read()
+            size = len(raw)
+            if size <= 0:
+                raise EvidenceValidationError(f"비어 있는 파일은 업로드할 수 없습니다: {filename}")
+            if size > EVIDENCE_MAX_FILE_BYTES:
+                raise EvidenceValidationError(
+                    f"파일 크기 제한(8MB)을 초과했습니다: {filename}"
+                )
+
+            file_type = "PDF" if extension == "pdf" else "이미지"
+            content_type = (evidence_file.content_type or "unknown").strip()
+            context_lines.append(
+                f"{index}. {filename} ({file_type}, {content_type}, {size} bytes)"
+            )
+    finally:
+        for evidence_file in files:
+            try:
+                await evidence_file.close()
+            except Exception:  # noqa: BLE001 - 업로드 파일 종료 시도는 best-effort
+                pass
+
+    return context_lines
+
+
+def _build_user_prompt(story: str, evidence_context: Sequence[str] | None) -> str:
+    normalized_story = story.strip()
+    evidence_lines = list(evidence_context or [])
+    if not evidence_lines:
+        return normalized_story
+
+    joined = "\n".join(f"- {line}" for line in evidence_lines)
+    return (
+        f"사연:\n{normalized_story}\n\n"
+        f"첨부 증거(메타데이터):\n{joined}\n\n"
+        "주의: 첨부 파일의 원문 내용은 분석하지 못했고 파일명/형식/크기 정보만 전달됨."
+    )
 
 
 @lru_cache(maxsize=1)
@@ -128,7 +202,7 @@ def _fallback_response(story: str, *, verdict: str | None = None) -> JudgmentRes
     )
 
 
-async def judge_story(story: str) -> JudgmentResponse:
+async def judge_story(story: str, *, evidence_context: Sequence[str] | None = None) -> JudgmentResponse:
     story = story.strip()
     if not story:
         return _fallback_response(story, verdict="사연이 비어 있어 판단을 생성할 수 없습니다.")
@@ -137,12 +211,14 @@ async def judge_story(story: str) -> JudgmentResponse:
     if client is None:
         return _fallback_response(story)
 
+    user_prompt = _build_user_prompt(story, evidence_context)
+
     try:
         response = await client.chat.completions.create(
             model=settings.openai_model,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": story},
+                {"role": "user", "content": user_prompt},
             ],
             response_format={"type": "json_object"},
             temperature=0.2,

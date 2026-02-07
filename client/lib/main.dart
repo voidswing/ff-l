@@ -1,14 +1,29 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:uuid/uuid.dart';
 
 const String _apiBaseUrlFromDefine = String.fromEnvironment('API_BASE_URL');
 const int _storyMinLength = 3;
 const int _storyMaxLength = 5000;
+const int _maxEvidenceFiles = 3;
+const List<String> _evidenceExtensions = [
+  'jpg',
+  'jpeg',
+  'png',
+  'webp',
+  'gif',
+  'bmp',
+  'heic',
+  'heif',
+  'pdf',
+];
 const Duration _requestTimeout = Duration(seconds: 20);
 
 void main() {
@@ -42,10 +57,17 @@ class JudgeHomePage extends StatefulWidget {
 class _JudgeHomePageState extends State<JudgeHomePage> {
   final TextEditingController _controller = TextEditingController();
   int _storyLength = 0;
+  bool _authenticating = true;
   bool _loading = false;
+  String? _userUdid;
+  final List<PlatformFile> _evidenceFiles = [];
   JudgmentResponse? _response;
   String? _error;
-  bool get _canSubmit => !_loading && _validateStory(_controller.text.trim()) == null;
+  bool get _canSubmit =>
+      !_authenticating &&
+      !_loading &&
+      _userUdid != null &&
+      _validateStory(_controller.text.trim()) == null;
 
   String get _apiBaseUrl {
     final fromDefine = _apiBaseUrlFromDefine.trim();
@@ -97,7 +119,137 @@ class _JudgeHomePageState extends State<JudgeHomePage> {
     return fallback;
   }
 
+  @override
+  void initState() {
+    super.initState();
+    _initializeUserSession();
+  }
+
+  Future<void> _initializeUserSession() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      var udid = prefs.getString('user_uuid');
+      if (udid == null || udid.trim().isEmpty) {
+        udid = const Uuid().v4();
+        await prefs.setString('user_uuid', udid);
+      }
+      await _loginByUdid(udid);
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _userUdid = udid;
+        _authenticating = false;
+      });
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _authenticating = false;
+        _error = 'UUID 로그인에 실패했습니다: $e';
+      });
+    }
+  }
+
+  Future<void> _loginByUdid(String udid) async {
+    final response = await http
+        .post(
+          Uri.parse('$_apiBaseUrl/api/user/login'),
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode({'udid': udid}),
+        )
+        .timeout(_requestTimeout);
+    if (response.statusCode != 200) {
+      throw StateError(_extractServerErrorMessage(response));
+    }
+  }
+
+  bool _isAllowedEvidenceFile(PlatformFile file) {
+    final extension = file.extension?.toLowerCase();
+    return extension != null && _evidenceExtensions.contains(extension);
+  }
+
+  String _formatFileSize(int bytes) {
+    if (bytes >= 1024 * 1024) {
+      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)}MB';
+    }
+    if (bytes >= 1024) {
+      return '${(bytes / 1024).toStringAsFixed(1)}KB';
+    }
+    return '${bytes}B';
+  }
+
+  Future<void> _pickEvidenceFiles() async {
+    if (_evidenceFiles.length >= _maxEvidenceFiles) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('증거 파일은 최대 3개까지 첨부할 수 있습니다.')),
+      );
+      return;
+    }
+
+    final picked = await FilePicker.platform.pickFiles(
+      allowMultiple: true,
+      type: FileType.custom,
+      allowedExtensions: _evidenceExtensions,
+      withData: kIsWeb,
+    );
+    if (picked == null || picked.files.isEmpty) {
+      return;
+    }
+
+    final merged = <PlatformFile>[..._evidenceFiles];
+    var excludedCount = 0;
+    for (final file in picked.files) {
+      if (merged.length >= _maxEvidenceFiles) {
+        excludedCount += 1;
+        continue;
+      }
+      if (!_isAllowedEvidenceFile(file)) {
+        excludedCount += 1;
+        continue;
+      }
+      final duplicate = merged.any(
+        (item) =>
+            item.name == file.name &&
+            item.size == file.size &&
+            item.path == file.path,
+      );
+      if (!duplicate) {
+        merged.add(file);
+      } else {
+        excludedCount += 1;
+      }
+    }
+
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _evidenceFiles
+        ..clear()
+        ..addAll(merged.take(_maxEvidenceFiles));
+    });
+
+    if (excludedCount > 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('일부 파일은 중복 또는 개수 제한으로 제외되었습니다.')),
+      );
+    }
+  }
+
   Future<void> _submit() async {
+    final userUdid = _userUdid;
+    if (userUdid == null || userUdid.isEmpty) {
+      setState(() {
+        _error = 'UUID 로그인 후 다시 시도해 주세요.';
+      });
+      return;
+    }
+
     final story = _controller.text.trim();
     final validationError = _validateStory(story);
     if (validationError != null) {
@@ -115,11 +267,37 @@ class _JudgeHomePageState extends State<JudgeHomePage> {
     });
 
     try {
-      final response = await http.post(
-        Uri.parse('$_apiBaseUrl/api/judge'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'story': story}),
-      ).timeout(_requestTimeout);
+      final request =
+          http.MultipartRequest('POST', Uri.parse('$_apiBaseUrl/api/judge'))
+            ..fields['story'] = story
+            ..headers['X-USER-UDID'] = userUdid;
+
+      for (final file in _evidenceFiles) {
+        if (file.bytes != null) {
+          request.files.add(
+            http.MultipartFile.fromBytes(
+              'evidence_files',
+              file.bytes!,
+              filename: file.name,
+            ),
+          );
+          continue;
+        }
+        final path = file.path;
+        if (path == null || path.isEmpty) {
+          throw StateError('파일 경로를 찾을 수 없습니다: ${file.name}');
+        }
+        request.files.add(
+          await http.MultipartFile.fromPath(
+            'evidence_files',
+            path,
+            filename: file.name,
+          ),
+        );
+      }
+
+      final streamed = await request.send().timeout(_requestTimeout);
+      final response = await http.Response.fromStream(streamed);
 
       if (response.statusCode == 200) {
         final data = jsonDecode(utf8.decode(response.bodyBytes));
@@ -192,12 +370,26 @@ class _JudgeHomePageState extends State<JudgeHomePage> {
               children: [
                 Text(
                   '사연을 들려주세요',
-                  style: theme.textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w700),
+                  style: theme.textTheme.headlineSmall
+                      ?.copyWith(fontWeight: FontWeight.w700),
                 ),
                 const SizedBox(height: 6),
                 Text(
                   'AI가 가능한 죄명과 근거를 요약해 드립니다.',
-                  style: theme.textTheme.bodyMedium?.copyWith(color: Colors.black54),
+                  style: theme.textTheme.bodyMedium
+                      ?.copyWith(color: Colors.black54),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  _authenticating
+                      ? 'UUID 로그인 중...'
+                      : (_userUdid == null
+                          ? 'UUID 로그인이 필요합니다.'
+                          : 'UUID: $_userUdid'),
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color:
+                        _userUdid == null ? Colors.redAccent : Colors.black54,
+                  ),
                 ),
                 const SizedBox(height: 16),
                 TextField(
@@ -220,9 +412,55 @@ class _JudgeHomePageState extends State<JudgeHomePage> {
                   alignment: Alignment.centerRight,
                   child: Text(
                     '$_storyLength/$_storyMaxLength',
-                    style: theme.textTheme.bodySmall?.copyWith(color: Colors.black54),
+                    style: theme.textTheme.bodySmall
+                        ?.copyWith(color: Colors.black54),
                   ),
                 ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    OutlinedButton.icon(
+                      onPressed: _loading ? null : _pickEvidenceFiles,
+                      icon: const Icon(Icons.attach_file),
+                      label: Text(
+                        '증거 첨부 (${_evidenceFiles.length}/$_maxEvidenceFiles)',
+                      ),
+                    ),
+                    if (_evidenceFiles.isNotEmpty)
+                      Text(
+                        '이미지/PDF',
+                        style: theme.textTheme.bodySmall
+                            ?.copyWith(color: Colors.black54),
+                      ),
+                  ],
+                ),
+                if (_evidenceFiles.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: _evidenceFiles
+                        .asMap()
+                        .entries
+                        .map(
+                          (entry) => InputChip(
+                            label: Text(
+                                '${entry.value.name} (${_formatFileSize(entry.value.size)})'),
+                            onDeleted: _loading
+                                ? null
+                                : () {
+                                    setState(() {
+                                      _evidenceFiles.removeAt(entry.key);
+                                    });
+                                  },
+                          ),
+                        )
+                        .toList(),
+                  ),
+                ],
                 const SizedBox(height: 12),
                 SizedBox(
                   width: double.infinity,
