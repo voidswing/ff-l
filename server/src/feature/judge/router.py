@@ -29,19 +29,18 @@ async def _parse_story_and_evidence(
     request: Request,
     *,
     story_form: str | None,
-    evidence_files_form: list[UploadFile] | None,
+    evidence_files_form: list[UploadFile | str] | None,
 ) -> tuple[str, list[UploadFile]]:
     content_type = request.headers.get("content-type", "").lower()
     if "multipart/form-data" in content_type:
         story = story_form.strip() if isinstance(story_form, str) else ""
-        files = list(evidence_files_form or [])
-        if files:
-            normalized: list[UploadFile] = []
-            for item in files:
-                if isinstance(item, StarletteUploadFile):
-                    normalized.append(item)
-            files = normalized
-        return story, files
+        raw_items = list(evidence_files_form or [])
+        normalized: list[UploadFile] = []
+        for item in raw_items:
+            # Swagger UI 기본 placeholder("string") 같은 문자열 필드는 무시한다.
+            if isinstance(item, StarletteUploadFile):
+                normalized.append(item)
+        return story, normalized
 
     try:
         payload = StoryRequest.model_validate(await request.json())
@@ -70,7 +69,7 @@ async def judge(
     request: Request,
     session: Session = Depends(get_session),
     story: str | None = Form(default=None, min_length=3, max_length=5000),
-    evidence_files: list[UploadFile] | None = File(default=None),
+    evidence_files: list[UploadFile | str] | None = File(default=None),
 ) -> JudgmentResponse:
     story, evidence_files = await _parse_story_and_evidence(
         request,

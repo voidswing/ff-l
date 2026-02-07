@@ -80,6 +80,28 @@ def test_judge_endpoint_rejects_more_than_three_evidence_files() -> None:
     assert "최대 3개" in response.json()["detail"]
 
 
+def test_judge_endpoint_ignores_string_placeholder_for_evidence_files() -> None:
+    original_key = service.settings.openai_api_key
+    service.settings.openai_api_key = None
+    service._build_client.cache_clear()
+
+    client = TestClient(app)
+    try:
+        response = client.post(
+            "/api/judge",
+            data={"story": "친구가 계속 놀려서 내가 때림"},
+            files=[("evidence_files", (None, "string"))],
+        )
+    finally:
+        service.settings.openai_api_key = original_key
+        service._build_client.cache_clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["summary"]
+    assert "법률 자문" in payload["disclaimer"]
+
+
 def test_user_login_with_udid_creates_or_updates_user() -> None:
     client = TestClient(app)
     udid = "6f3ee6d0-9fdb-4eca-9f3f-6c74c56b830d"
