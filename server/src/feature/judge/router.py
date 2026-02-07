@@ -3,7 +3,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from pydantic import ValidationError
 from sqlmodel import Session, select
 from starlette.datastructures import UploadFile as StarletteUploadFile
@@ -25,18 +25,22 @@ async def _close_upload_files(files: Sequence[UploadFile]) -> None:
             pass
 
 
-async def _parse_story_and_evidence(request: Request) -> tuple[str, list[UploadFile]]:
+async def _parse_story_and_evidence(
+    request: Request,
+    *,
+    story_form: str | None,
+    evidence_files_form: list[UploadFile] | None,
+) -> tuple[str, list[UploadFile]]:
     content_type = request.headers.get("content-type", "").lower()
     if "multipart/form-data" in content_type:
-        form = await request.form()
-        story_raw = form.get("story")
-        story = story_raw.strip() if isinstance(story_raw, str) else ""
-
-        files: list[UploadFile] = []
-        for key in ("evidence_files", "evidence_files[]", "evidenceFiles"):
-            for item in form.getlist(key):
+        story = story_form.strip() if isinstance(story_form, str) else ""
+        files = list(evidence_files_form or [])
+        if files:
+            normalized: list[UploadFile] = []
+            for item in files:
                 if isinstance(item, StarletteUploadFile):
-                    files.append(item)
+                    normalized.append(item)
+            files = normalized
         return story, files
 
     try:
@@ -65,8 +69,14 @@ def _upsert_user(session: Session, udid: str) -> None:
 async def judge(
     request: Request,
     session: Session = Depends(get_session),
+    story: str | None = Form(default=None, min_length=3, max_length=5000),
+    evidence_files: list[UploadFile] | None = File(default=None),
 ) -> JudgmentResponse:
-    story, evidence_files = await _parse_story_and_evidence(request)
+    story, evidence_files = await _parse_story_and_evidence(
+        request,
+        story_form=story,
+        evidence_files_form=evidence_files,
+    )
     try:
         payload = StoryRequest(story=story)
     except ValidationError as exc:
