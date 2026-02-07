@@ -148,3 +148,39 @@ def test_judge_story_uses_max_completion_tokens_for_gpt5_models(monkeypatch) -> 
     assert result.summary == "요약"
     assert called_kwargs["max_completion_tokens"] == 700
     assert "max_tokens" not in called_kwargs
+    assert "temperature" not in called_kwargs
+
+
+def test_judge_story_uses_temperature_and_max_tokens_for_non_gpt5_models(monkeypatch) -> None:
+    called_kwargs: dict[str, object] = {}
+
+    class PassingCompletions:
+        async def create(self, **kwargs):  # noqa: ANN003
+            called_kwargs.update(kwargs)
+            choice = type(
+                "Choice",
+                (),
+                {"message": type("Msg", (), {"content": "{\"summary\":\"요약\",\"possible_crimes\":[],\"verdict\":\"판단\",\"disclaimer\":\"법률 자문이 아닙니다.\"}"})()},
+            )()
+            return type("Resp", (), {"choices": [choice]})()
+
+    class FakeChat:
+        def __init__(self) -> None:
+            self.completions = PassingCompletions()
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.chat = FakeChat()
+
+    original_model = service.settings.openai_model
+    service.settings.openai_model = "gpt-4o-mini"
+    monkeypatch.setattr(service, "_build_client", lambda: FakeClient())
+    try:
+        result = asyncio.run(service.judge_story("친구가 날 밀쳤다"))
+    finally:
+        service.settings.openai_model = original_model
+
+    assert result.summary == "요약"
+    assert called_kwargs["max_tokens"] == 700
+    assert called_kwargs["temperature"] == 0.2
+    assert "max_completion_tokens" not in called_kwargs

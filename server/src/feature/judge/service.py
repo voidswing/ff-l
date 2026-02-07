@@ -195,6 +195,10 @@ def _normalize_response(data: dict[str, Any], story: str) -> JudgmentResponse:
     )
 
 
+def _is_gpt5_model(model: str) -> bool:
+    return model.strip().lower().startswith("gpt-5")
+
+
 def _fallback_response(story: str, *, verdict: str | None = None) -> JudgmentResponse:
     return JudgmentResponse(
         summary=_short_story(story),
@@ -217,19 +221,23 @@ async def judge_story(story: str, *, evidence_context: Sequence[str] | None = No
         return _fallback_response(story)
 
     user_prompt = _build_user_prompt(story, evidence_context)
+    completion_kwargs: dict[str, Any] = {
+        "model": settings.openai_model,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+        "response_format": {"type": "json_object"},
+        "timeout": settings.openai_timeout_seconds,
+    }
+    if _is_gpt5_model(settings.openai_model):
+        completion_kwargs["max_completion_tokens"] = 700
+    else:
+        completion_kwargs["temperature"] = 0.2
+        completion_kwargs["max_tokens"] = 700
 
     try:
-        response = await client.chat.completions.create(
-            model=settings.openai_model,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.2,
-            max_completion_tokens=700,
-            timeout=settings.openai_timeout_seconds,
-        )
+        response = await client.chat.completions.create(**completion_kwargs)
     except Exception as exc:  # noqa: BLE001 - 외부 API 예외를 넓게 수용
         logger.exception(
             "OpenAI model call failed | model=%s | timeout=%.1f | error_type=%s | error=%s",
