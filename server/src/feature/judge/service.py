@@ -199,6 +199,25 @@ def _is_gpt5_model(model: str) -> bool:
     return model.strip().lower().startswith("gpt-5")
 
 
+def _extract_message_text(message: Any) -> str:
+    content = getattr(message, "content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        texts: list[str] = []
+        for part in content:
+            if isinstance(part, dict):
+                text = part.get("text")
+                if isinstance(text, str) and text.strip():
+                    texts.append(text)
+                continue
+            text = getattr(part, "text", None)
+            if isinstance(text, str) and text.strip():
+                texts.append(text)
+        return "\n".join(texts)
+    return ""
+
+
 def _build_completion_kwargs(
     *,
     model: str,
@@ -226,6 +245,79 @@ def _build_completion_kwargs(
     return completion_kwargs
 
 
+async def _request_json_data(
+    client: AsyncOpenAI,
+    *,
+    model: str,
+    user_prompt: str,
+    timeout_seconds: float,
+) -> tuple[dict[str, Any] | None, str | None]:
+    first_kwargs = _build_completion_kwargs(
+        model=model,
+        user_prompt=user_prompt,
+        timeout_seconds=timeout_seconds,
+    )
+    try:
+        response = await client.chat.completions.create(**first_kwargs)
+    except Exception as exc:  # noqa: BLE001 - 외부 API 예외를 넓게 수용
+        logger.exception(
+            "OpenAI model call failed | model=%s | timeout=%.1f | error_type=%s | error=%s",
+            model,
+            timeout_seconds,
+            type(exc).__name__,
+            str(exc),
+        )
+        return None, "call_error"
+
+    message = response.choices[0].message
+    content = _extract_message_text(message)
+    data = _safe_json_loads(content) or _extract_json(content)
+    if data:
+        return data, None
+
+    preview = content[:240].replace("\n", "\\n")
+    refusal = getattr(message, "refusal", None)
+    logger.error(
+        "Failed to parse model response as JSON (first try) | model=%s | content_preview=%s | refusal=%s",
+        model,
+        preview,
+        str(refusal),
+    )
+
+    retry_kwargs = _build_completion_kwargs(
+        model=model,
+        user_prompt=user_prompt,
+        timeout_seconds=timeout_seconds,
+        force_plain_json=True,
+    )
+    try:
+        retry_response = await client.chat.completions.create(**retry_kwargs)
+    except Exception as exc:  # noqa: BLE001 - 재시도 실패
+        logger.exception(
+            "OpenAI model retry failed | model=%s | error_type=%s | error=%s",
+            model,
+            type(exc).__name__,
+            str(exc),
+        )
+        return None, "call_error"
+
+    retry_message = retry_response.choices[0].message
+    retry_content = _extract_message_text(retry_message)
+    retry_data = _safe_json_loads(retry_content) or _extract_json(retry_content)
+    if retry_data:
+        return retry_data, None
+
+    retry_preview = retry_content[:240].replace("\n", "\\n")
+    retry_refusal = getattr(retry_message, "refusal", None)
+    logger.error(
+        "Failed to parse model response as JSON (retry) | model=%s | content_preview=%s | refusal=%s",
+        model,
+        retry_preview,
+        str(retry_refusal),
+    )
+    return None, "parse_error"
+
+
 def _fallback_response(story: str, *, verdict: str | None = None) -> JudgmentResponse:
     return JudgmentResponse(
         summary=_short_story(story),
@@ -248,62 +340,37 @@ async def judge_story(story: str, *, evidence_context: Sequence[str] | None = No
         return _fallback_response(story)
 
     user_prompt = _build_user_prompt(story, evidence_context)
-    completion_kwargs = _build_completion_kwargs(
-        model=settings.openai_model,
+    primary_model = settings.openai_model
+    reasons: list[str] = []
+    data, reason = await _request_json_data(
+        client,
+        model=primary_model,
         user_prompt=user_prompt,
         timeout_seconds=settings.openai_timeout_seconds,
     )
-
-    try:
-        response = await client.chat.completions.create(**completion_kwargs)
-    except Exception as exc:  # noqa: BLE001 - 외부 API 예외를 넓게 수용
-        logger.exception(
-            "OpenAI model call failed | model=%s | timeout=%.1f | error_type=%s | error=%s",
-            settings.openai_model,
-            settings.openai_timeout_seconds,
-            type(exc).__name__,
-            str(exc),
-        )
-        return _fallback_response(story, verdict="모델 호출에 실패했습니다. 잠시 후 다시 시도해 주세요.")
-
-    content = response.choices[0].message.content or ""
-    data = _safe_json_loads(content) or _extract_json(content)
     if data:
         return _normalize_response(data, story)
+    if reason:
+        reasons.append(reason)
 
-    preview = content[:240].replace("\n", "\\n")
-    logger.error(
-        "Failed to parse model response as JSON (first try) | model=%s | content_preview=%s",
-        settings.openai_model,
-        preview,
-    )
-
-    retry_kwargs = _build_completion_kwargs(
-        model=settings.openai_model,
-        user_prompt=user_prompt,
-        timeout_seconds=settings.openai_timeout_seconds,
-        force_plain_json=True,
-    )
-    try:
-        retry_response = await client.chat.completions.create(**retry_kwargs)
-    except Exception as exc:  # noqa: BLE001 - 재시도 실패 시에도 fallback 응답
-        logger.exception(
-            "OpenAI model retry failed | model=%s | error_type=%s | error=%s",
-            settings.openai_model,
-            type(exc).__name__,
-            str(exc),
+    fallback_model = "gpt-4o-mini"
+    if primary_model != fallback_model:
+        logger.warning(
+            "Primary model failed to return parsable JSON. Trying fallback model | primary=%s | fallback=%s",
+            primary_model,
+            fallback_model,
         )
+        fallback_data, fallback_reason = await _request_json_data(
+            client,
+            model=fallback_model,
+            user_prompt=user_prompt,
+            timeout_seconds=settings.openai_timeout_seconds,
+        )
+        if fallback_data:
+            return _normalize_response(fallback_data, story)
+        if fallback_reason:
+            reasons.append(fallback_reason)
+
+    if reasons and all(item == "call_error" for item in reasons):
         return _fallback_response(story, verdict="모델 호출에 실패했습니다. 잠시 후 다시 시도해 주세요.")
-
-    retry_content = retry_response.choices[0].message.content or ""
-    retry_data = _safe_json_loads(retry_content) or _extract_json(retry_content)
-    if not retry_data:
-        retry_preview = retry_content[:240].replace("\n", "\\n")
-        logger.error(
-            "Failed to parse model response as JSON (retry) | model=%s | content_preview=%s",
-            settings.openai_model,
-            retry_preview,
-        )
-        return _fallback_response(story, verdict="모델 응답을 파싱하지 못했습니다. 잠시 후 다시 시도해 주세요.")
-
-    return _normalize_response(retry_data, story)
+    return _fallback_response(story, verdict="모델 응답을 파싱하지 못했습니다. 잠시 후 다시 시도해 주세요.")

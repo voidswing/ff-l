@@ -220,3 +220,46 @@ def test_judge_story_retries_when_first_response_is_empty(monkeypatch) -> None:
     assert len(calls) == 2
     assert "response_format" in calls[0]
     assert "response_format" not in calls[1]
+
+
+def test_judge_story_falls_back_to_gpt4o_when_gpt5_returns_empty(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    class FallbackCompletions:
+        async def create(self, **kwargs):  # noqa: ANN003
+            calls.append(kwargs)
+            model = str(kwargs.get("model"))
+            if model == "gpt-5-nano":
+                # gpt-5는 두 번 모두 빈 응답
+                choice = type("Choice", (), {"message": type("Msg", (), {"content": ""})()})()
+                return type("Resp", (), {"choices": [choice]})()
+            # fallback model(gpt-4o-mini)은 정상 JSON
+            choice = type(
+                "Choice",
+                (),
+                {"message": type("Msg", (), {"content": "{\"summary\":\"폴백요약\",\"possible_crimes\":[],\"verdict\":\"폴백판단\",\"disclaimer\":\"법률 자문이 아닙니다.\"}"})()},
+            )()
+            return type("Resp", (), {"choices": [choice]})()
+
+    class FakeChat:
+        def __init__(self) -> None:
+            self.completions = FallbackCompletions()
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.chat = FakeChat()
+
+    original_model = service.settings.openai_model
+    service.settings.openai_model = "gpt-5-nano"
+    monkeypatch.setattr(service, "_build_client", lambda: FakeClient())
+    try:
+        result = asyncio.run(service.judge_story("친구가 날 밀쳤다"))
+    finally:
+        service.settings.openai_model = original_model
+
+    assert result.summary == "폴백요약"
+    models = [str(item.get("model")) for item in calls]
+    # primary(2회) + fallback(1회 이상)
+    assert models[0] == "gpt-5-nano"
+    assert models[1] == "gpt-5-nano"
+    assert "gpt-4o-mini" in models
