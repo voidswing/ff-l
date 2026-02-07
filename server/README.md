@@ -7,6 +7,26 @@
 - 판단 요청 수신 시점 로그(`judge_request_log`, status=`processing`)
 - LLM 결과 수신 후 결과/상태 업데이트(`completed` 또는 `failed`)
 
+## Docker 실행 (ff/d, ff/a와 동일 패턴)
+
+사전 준비:
+
+```bash
+cd ../..
+docker compose -f docker-compose-db.yml up -d
+```
+
+API 실행:
+
+```bash
+cd l/server
+docker compose up --build
+```
+
+접속:
+- API: `http://localhost:8003`
+- Docs: `http://localhost:8003/docs`
+
 ## 실행
 
 ```bash

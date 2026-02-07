@@ -1,0 +1,45 @@
+# AI Judge API (Project L)
+# This connects to the shared PostgreSQL database.
+# Start shared DB first:
+#   cd ../..
+#   docker compose -f docker-compose-db.yml up -d
+
+services:
+  l-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: l-api
+    restart: unless-stopped
+    environment:
+      - APP_NAME=${APP_NAME:-AI Judge API}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-5-nano}
+      - OPENAI_TIMEOUT_SECONDS=${OPENAI_TIMEOUT_SECONDS:-20}
+      - DB_NAME=${DB_NAME:-l}
+      - DB_USER=${DB_USER:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-postgres}
+      - DB_HOST=ff-postgres
+      - DB_PORT=${DB_PORT:-5432}
+      - DB_ECHO=${DB_ECHO:-false}
+      - CORS_ALLOW_ORIGINS=${CORS_ALLOW_ORIGINS:-["*"]}
+      - CORS_ALLOW_CREDENTIALS=${CORS_ALLOW_CREDENTIALS:-false}
+    volumes:
+      - ./src:/app/src
+      - ./pyproject.toml:/app/pyproject.toml
+      - ./uv.lock:/app/uv.lock
+    ports:
+      - "8003:8000"
+    networks:
+      - ff-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+networks:
+  ff-network:
+    external: true
+    name: ff-network
