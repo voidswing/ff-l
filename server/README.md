@@ -16,6 +16,9 @@ uv run uvicorn src.main:app --reload --host 0.0.0.0 --port 8000
 
 선택 환경변수:
 - `OPENAI_MODEL` (기본값: `gpt-4o-mini`)
+- `OPENAI_TIMEOUT_SECONDS` (기본값: `20`)
+- `CORS_ALLOW_ORIGINS` (기본값: `["*"]`)
+- `CORS_ALLOW_CREDENTIALS` (기본값: `false`)
 
 ## 엔드포인트
 

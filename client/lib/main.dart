@@ -1,9 +1,15 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:http/http.dart' as http;
+
+const String _apiBaseUrlFromDefine = String.fromEnvironment('API_BASE_URL');
+const int _storyMinLength = 3;
+const int _storyMaxLength = 5000;
+const Duration _requestTimeout = Duration(seconds: 20);
 
 void main() {
   runApp(const JudgeApp());
@@ -35,11 +41,17 @@ class JudgeHomePage extends StatefulWidget {
 
 class _JudgeHomePageState extends State<JudgeHomePage> {
   final TextEditingController _controller = TextEditingController();
+  int _storyLength = 0;
   bool _loading = false;
   JudgmentResponse? _response;
   String? _error;
+  bool get _canSubmit => !_loading && _validateStory(_controller.text.trim()) == null;
 
   String get _apiBaseUrl {
+    final fromDefine = _apiBaseUrlFromDefine.trim();
+    if (fromDefine.isNotEmpty) {
+      return fromDefine;
+    }
     if (kIsWeb) {
       return 'http://localhost:8000';
     }
@@ -49,11 +61,48 @@ class _JudgeHomePageState extends State<JudgeHomePage> {
     return 'http://localhost:8000';
   }
 
+  String? _validateStory(String story) {
+    if (story.isEmpty) {
+      return '사연을 입력해 주세요.';
+    }
+    if (story.length < _storyMinLength) {
+      return '사연은 최소 $_storyMinLength자 이상 입력해 주세요.';
+    }
+    if (story.length > _storyMaxLength) {
+      return '사연은 최대 $_storyMaxLength자까지 입력할 수 있습니다.';
+    }
+    return null;
+  }
+
+  String _extractServerErrorMessage(http.Response response) {
+    final fallback = '요청 실패: ${response.statusCode}';
+    try {
+      final decoded = jsonDecode(utf8.decode(response.bodyBytes));
+      if (decoded is Map<String, dynamic>) {
+        final detail = decoded['detail'];
+        if (detail is String && detail.trim().isNotEmpty) {
+          return detail;
+        }
+        if (detail is List && detail.isNotEmpty) {
+          final first = detail.first;
+          if (first is Map<String, dynamic>) {
+            final message = first['msg'];
+            if (message is String && message.trim().isNotEmpty) {
+              return message;
+            }
+          }
+        }
+      }
+    } catch (_) {}
+    return fallback;
+  }
+
   Future<void> _submit() async {
     final story = _controller.text.trim();
-    if (story.isEmpty) {
+    final validationError = _validateStory(story);
+    if (validationError != null) {
       setState(() {
-        _error = '사연을 입력해 주세요.';
+        _error = validationError;
         _response = null;
       });
       return;
@@ -70,26 +119,47 @@ class _JudgeHomePageState extends State<JudgeHomePage> {
         Uri.parse('$_apiBaseUrl/api/judge'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'story': story}),
-      );
+      ).timeout(_requestTimeout);
 
       if (response.statusCode == 200) {
         final data = jsonDecode(utf8.decode(response.bodyBytes));
+        if (!mounted) {
+          return;
+        }
         setState(() {
           _response = JudgmentResponse.fromJson(data as Map<String, dynamic>);
         });
       } else {
+        final message = _extractServerErrorMessage(response);
+        if (!mounted) {
+          return;
+        }
         setState(() {
-          _error = '요청 실패: ${response.statusCode}';
+          _error = message;
         });
       }
     } catch (e) {
+      if (e is TimeoutException) {
+        if (!mounted) {
+          return;
+        }
+        setState(() {
+          _error = '요청 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.';
+        });
+        return;
+      }
+      if (!mounted) {
+        return;
+      }
       setState(() {
-        _error = '오류 발생: $e';
+        _error = '네트워크 오류가 발생했습니다: $e';
       });
     } finally {
-      setState(() {
-        _loading = false;
-      });
+      if (mounted) {
+        setState(() {
+          _loading = false;
+        });
+      }
     }
   }
 
@@ -133,6 +203,12 @@ class _JudgeHomePageState extends State<JudgeHomePage> {
                 TextField(
                   controller: _controller,
                   maxLines: 6,
+                  maxLength: _storyMaxLength,
+                  onChanged: (value) {
+                    setState(() {
+                      _storyLength = value.length;
+                    });
+                  },
                   decoration: const InputDecoration(
                     labelText: '사연을 입력하세요',
                     border: OutlineInputBorder(),
@@ -140,11 +216,18 @@ class _JudgeHomePageState extends State<JudgeHomePage> {
                     fillColor: Colors.white,
                   ),
                 ),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: Text(
+                    '$_storyLength/$_storyMaxLength',
+                    style: theme.textTheme.bodySmall?.copyWith(color: Colors.black54),
+                  ),
+                ),
                 const SizedBox(height: 12),
                 SizedBox(
                   width: double.infinity,
                   child: FilledButton(
-                    onPressed: _loading ? null : _submit,
+                    onPressed: _canSubmit ? _submit : null,
                     child: _loading
                         ? const SizedBox(
                             width: 18,
@@ -264,8 +347,8 @@ class _JudgeHomePageState extends State<JudgeHomePage> {
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: color.withOpacity(0.25)),
-        color: color.withOpacity(0.08),
+        border: Border.all(color: color.withValues(alpha: 0.25)),
+        color: color.withValues(alpha: 0.08),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,

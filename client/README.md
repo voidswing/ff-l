@@ -13,3 +13,9 @@ flutter run
 서버가 `http://localhost:8000`에서 실행 중이어야 합니다.
 
 안드로이드 에뮬레이터에서 실행할 경우 앱이 자동으로 `http://10.0.2.2:8000`을 사용합니다.
+
+배포/원격 환경에서는 다음처럼 API 주소를 주입할 수 있습니다.
+
+```bash
+flutter run --dart-define=API_BASE_URL=https://your-api.example.com
+```
