@@ -4,7 +4,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     app_name: str = "AI Judge API"
     openai_api_key: str | None = None
-    openai_model: str = "gpt-5-nano"
+    openai_model: str = "gpt-5.2"
     openai_timeout_seconds: float = 20.0
     db_host: str = "ff-postgres"
     db_port: int = 5432

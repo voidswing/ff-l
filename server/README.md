@@ -40,7 +40,7 @@ uv run uvicorn src.main:app --reload --host 0.0.0.0 --port 8000
 `.env.example`을 참고해서 `.env`를 생성하세요.
 
 선택 환경변수:
-- `OPENAI_MODEL` (기본값: `gpt-5-nano`)
+- `OPENAI_MODEL` (기본값: `gpt-5.2`)
 - `OPENAI_TIMEOUT_SECONDS` (기본값: `20`)
 - `DB_HOST` (기본값: `ff-postgres`)
 - `DB_PORT` (기본값: `5432`)

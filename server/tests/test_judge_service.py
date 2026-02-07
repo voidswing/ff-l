@@ -229,7 +229,7 @@ def test_judge_story_falls_back_to_gpt4o_when_gpt5_returns_empty(monkeypatch) ->
         async def create(self, **kwargs):  # noqa: ANN003
             calls.append(kwargs)
             model = str(kwargs.get("model"))
-            if model == "gpt-5-nano":
+            if model == "gpt-5.2":
                 # gpt-5는 두 번 모두 빈 응답
                 choice = type("Choice", (), {"message": type("Msg", (), {"content": ""})()})()
                 return type("Resp", (), {"choices": [choice]})()
@@ -250,7 +250,7 @@ def test_judge_story_falls_back_to_gpt4o_when_gpt5_returns_empty(monkeypatch) ->
             self.chat = FakeChat()
 
     original_model = service.settings.openai_model
-    service.settings.openai_model = "gpt-5-nano"
+    service.settings.openai_model = "gpt-5.2"
     monkeypatch.setattr(service, "_build_client", lambda: FakeClient())
     try:
         result = asyncio.run(service.judge_story("친구가 날 밀쳤다"))
@@ -260,6 +260,6 @@ def test_judge_story_falls_back_to_gpt4o_when_gpt5_returns_empty(monkeypatch) ->
     assert result.summary == "폴백요약"
     models = [str(item.get("model")) for item in calls]
     # primary(2회) + fallback(1회 이상)
-    assert models[0] == "gpt-5-nano"
-    assert models[1] == "gpt-5-nano"
+    assert models[0] == "gpt-5.2"
+    assert models[1] == "gpt-5.2"
     assert "gpt-4o-mini" in models
