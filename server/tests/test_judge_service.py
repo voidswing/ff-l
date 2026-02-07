@@ -184,3 +184,39 @@ def test_judge_story_uses_temperature_and_max_tokens_for_non_gpt5_models(monkeyp
     assert called_kwargs["max_tokens"] == 700
     assert called_kwargs["temperature"] == 0.2
     assert "max_completion_tokens" not in called_kwargs
+
+
+def test_judge_story_retries_when_first_response_is_empty(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    class RetryingCompletions:
+        async def create(self, **kwargs):  # noqa: ANN003
+            calls.append(kwargs)
+            if len(calls) == 1:
+                # 첫 호출은 빈 content
+                choice = type("Choice", (), {"message": type("Msg", (), {"content": ""})()})()
+                return type("Resp", (), {"choices": [choice]})()
+            # 두 번째 호출은 JSON 응답
+            choice = type(
+                "Choice",
+                (),
+                {"message": type("Msg", (), {"content": "{\"summary\":\"요약\",\"possible_crimes\":[],\"verdict\":\"판단\",\"disclaimer\":\"법률 자문이 아닙니다.\"}"})()},
+            )()
+            return type("Resp", (), {"choices": [choice]})()
+
+    class FakeChat:
+        def __init__(self) -> None:
+            self.completions = RetryingCompletions()
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.chat = FakeChat()
+
+    monkeypatch.setattr(service, "_build_client", lambda: FakeClient())
+
+    result = asyncio.run(service.judge_story("친구가 날 밀쳤다"))
+
+    assert result.summary == "요약"
+    assert len(calls) == 2
+    assert "response_format" in calls[0]
+    assert "response_format" not in calls[1]

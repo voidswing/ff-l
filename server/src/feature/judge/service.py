@@ -199,6 +199,33 @@ def _is_gpt5_model(model: str) -> bool:
     return model.strip().lower().startswith("gpt-5")
 
 
+def _build_completion_kwargs(
+    *,
+    model: str,
+    user_prompt: str,
+    timeout_seconds: float,
+    force_plain_json: bool = False,
+) -> dict[str, Any]:
+    completion_kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+        "timeout": timeout_seconds,
+    }
+    if not force_plain_json:
+        completion_kwargs["response_format"] = {"type": "json_object"}
+
+    if _is_gpt5_model(model):
+        completion_kwargs["max_completion_tokens"] = 700
+    else:
+        completion_kwargs["temperature"] = 0.2
+        completion_kwargs["max_tokens"] = 700
+
+    return completion_kwargs
+
+
 def _fallback_response(story: str, *, verdict: str | None = None) -> JudgmentResponse:
     return JudgmentResponse(
         summary=_short_story(story),
@@ -221,20 +248,11 @@ async def judge_story(story: str, *, evidence_context: Sequence[str] | None = No
         return _fallback_response(story)
 
     user_prompt = _build_user_prompt(story, evidence_context)
-    completion_kwargs: dict[str, Any] = {
-        "model": settings.openai_model,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ],
-        "response_format": {"type": "json_object"},
-        "timeout": settings.openai_timeout_seconds,
-    }
-    if _is_gpt5_model(settings.openai_model):
-        completion_kwargs["max_completion_tokens"] = 700
-    else:
-        completion_kwargs["temperature"] = 0.2
-        completion_kwargs["max_tokens"] = 700
+    completion_kwargs = _build_completion_kwargs(
+        model=settings.openai_model,
+        user_prompt=user_prompt,
+        timeout_seconds=settings.openai_timeout_seconds,
+    )
 
     try:
         response = await client.chat.completions.create(**completion_kwargs)
@@ -250,13 +268,42 @@ async def judge_story(story: str, *, evidence_context: Sequence[str] | None = No
 
     content = response.choices[0].message.content or ""
     data = _safe_json_loads(content) or _extract_json(content)
-    if not data:
-        preview = content[:240].replace("\n", "\\n")
-        logger.error(
-            "Failed to parse model response as JSON | model=%s | content_preview=%s",
+    if data:
+        return _normalize_response(data, story)
+
+    preview = content[:240].replace("\n", "\\n")
+    logger.error(
+        "Failed to parse model response as JSON (first try) | model=%s | content_preview=%s",
+        settings.openai_model,
+        preview,
+    )
+
+    retry_kwargs = _build_completion_kwargs(
+        model=settings.openai_model,
+        user_prompt=user_prompt,
+        timeout_seconds=settings.openai_timeout_seconds,
+        force_plain_json=True,
+    )
+    try:
+        retry_response = await client.chat.completions.create(**retry_kwargs)
+    except Exception as exc:  # noqa: BLE001 - 재시도 실패 시에도 fallback 응답
+        logger.exception(
+            "OpenAI model retry failed | model=%s | error_type=%s | error=%s",
             settings.openai_model,
-            preview,
+            type(exc).__name__,
+            str(exc),
+        )
+        return _fallback_response(story, verdict="모델 호출에 실패했습니다. 잠시 후 다시 시도해 주세요.")
+
+    retry_content = retry_response.choices[0].message.content or ""
+    retry_data = _safe_json_loads(retry_content) or _extract_json(retry_content)
+    if not retry_data:
+        retry_preview = retry_content[:240].replace("\n", "\\n")
+        logger.error(
+            "Failed to parse model response as JSON (retry) | model=%s | content_preview=%s",
+            settings.openai_model,
+            retry_preview,
         )
         return _fallback_response(story, verdict="모델 응답을 파싱하지 못했습니다. 잠시 후 다시 시도해 주세요.")
 
-    return _normalize_response(data, story)
+    return _normalize_response(retry_data, story)
