@@ -227,7 +227,7 @@ async def judge_story(story: str, *, evidence_context: Sequence[str] | None = No
             ],
             response_format={"type": "json_object"},
             temperature=0.2,
-            max_tokens=700,
+            max_completion_tokens=700,
             timeout=settings.openai_timeout_seconds,
         )
     except Exception as exc:  # noqa: BLE001 - 외부 API 예외를 넓게 수용

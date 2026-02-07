@@ -118,3 +118,33 @@ def test_judge_story_logs_parse_failure_reason(monkeypatch, caplog) -> None:
 
     assert "모델 응답을 파싱하지 못했습니다" in result.verdict
     assert "Failed to parse model response as JSON" in caplog.text
+
+
+def test_judge_story_uses_max_completion_tokens_for_gpt5_models(monkeypatch) -> None:
+    called_kwargs: dict[str, object] = {}
+
+    class PassingCompletions:
+        async def create(self, **kwargs):  # noqa: ANN003
+            called_kwargs.update(kwargs)
+            choice = type(
+                "Choice",
+                (),
+                {"message": type("Msg", (), {"content": "{\"summary\":\"요약\",\"possible_crimes\":[],\"verdict\":\"판단\",\"disclaimer\":\"법률 자문이 아닙니다.\"}"})()},
+            )()
+            return type("Resp", (), {"choices": [choice]})()
+
+    class FakeChat:
+        def __init__(self) -> None:
+            self.completions = PassingCompletions()
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.chat = FakeChat()
+
+    monkeypatch.setattr(service, "_build_client", lambda: FakeClient())
+
+    result = asyncio.run(service.judge_story("친구가 날 밀쳤다"))
+
+    assert result.summary == "요약"
+    assert called_kwargs["max_completion_tokens"] == 700
+    assert "max_tokens" not in called_kwargs
