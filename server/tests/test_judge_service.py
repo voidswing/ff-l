@@ -151,41 +151,6 @@ def test_judge_story_uses_max_completion_tokens_for_gpt5_models(monkeypatch) -> 
     assert "temperature" not in called_kwargs
 
 
-def test_judge_story_uses_temperature_and_max_tokens_for_non_gpt5_models(monkeypatch) -> None:
-    called_kwargs: dict[str, object] = {}
-
-    class PassingCompletions:
-        async def create(self, **kwargs):  # noqa: ANN003
-            called_kwargs.update(kwargs)
-            choice = type(
-                "Choice",
-                (),
-                {"message": type("Msg", (), {"content": "{\"summary\":\"요약\",\"possible_crimes\":[],\"verdict\":\"판단\",\"disclaimer\":\"법률 자문이 아닙니다.\"}"})()},
-            )()
-            return type("Resp", (), {"choices": [choice]})()
-
-    class FakeChat:
-        def __init__(self) -> None:
-            self.completions = PassingCompletions()
-
-    class FakeClient:
-        def __init__(self) -> None:
-            self.chat = FakeChat()
-
-    original_model = service.settings.openai_model
-    service.settings.openai_model = "gpt-4o-mini"
-    monkeypatch.setattr(service, "_build_client", lambda: FakeClient())
-    try:
-        result = asyncio.run(service.judge_story("친구가 날 밀쳤다"))
-    finally:
-        service.settings.openai_model = original_model
-
-    assert result.summary == "요약"
-    assert called_kwargs["max_tokens"] == 700
-    assert called_kwargs["temperature"] == 0.2
-    assert "max_completion_tokens" not in called_kwargs
-
-
 def test_judge_story_retries_when_first_response_is_empty(monkeypatch) -> None:
     calls: list[dict[str, object]] = []
 
@@ -222,28 +187,18 @@ def test_judge_story_retries_when_first_response_is_empty(monkeypatch) -> None:
     assert "response_format" not in calls[1]
 
 
-def test_judge_story_falls_back_to_gpt4o_when_gpt5_returns_empty(monkeypatch) -> None:
+def test_judge_story_does_not_use_secondary_model_when_gpt5_returns_empty(monkeypatch) -> None:
     calls: list[dict[str, object]] = []
 
-    class FallbackCompletions:
+    class EmptyCompletions:
         async def create(self, **kwargs):  # noqa: ANN003
             calls.append(kwargs)
-            model = str(kwargs.get("model"))
-            if model == "gpt-5.2":
-                # gpt-5는 두 번 모두 빈 응답
-                choice = type("Choice", (), {"message": type("Msg", (), {"content": ""})()})()
-                return type("Resp", (), {"choices": [choice]})()
-            # fallback model(gpt-4o-mini)은 정상 JSON
-            choice = type(
-                "Choice",
-                (),
-                {"message": type("Msg", (), {"content": "{\"summary\":\"폴백요약\",\"possible_crimes\":[],\"verdict\":\"폴백판단\",\"disclaimer\":\"법률 자문이 아닙니다.\"}"})()},
-            )()
+            choice = type("Choice", (), {"message": type("Msg", (), {"content": ""})()})()
             return type("Resp", (), {"choices": [choice]})()
 
     class FakeChat:
         def __init__(self) -> None:
-            self.completions = FallbackCompletions()
+            self.completions = EmptyCompletions()
 
     class FakeClient:
         def __init__(self) -> None:
@@ -257,9 +212,9 @@ def test_judge_story_falls_back_to_gpt4o_when_gpt5_returns_empty(monkeypatch) ->
     finally:
         service.settings.openai_model = original_model
 
-    assert result.summary == "폴백요약"
+    assert "모델 응답을 파싱하지 못했습니다" in result.verdict
     models = [str(item.get("model")) for item in calls]
-    # primary(2회) + fallback(1회 이상)
+    # primary 1차 + retry 1차
     assert models[0] == "gpt-5.2"
     assert models[1] == "gpt-5.2"
-    assert "gpt-4o-mini" in models
+    assert all(model == "gpt-5.2" for model in models)

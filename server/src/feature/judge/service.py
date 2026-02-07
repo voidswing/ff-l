@@ -195,10 +195,6 @@ def _normalize_response(data: dict[str, Any], story: str) -> JudgmentResponse:
     )
 
 
-def _is_gpt5_model(model: str) -> bool:
-    return model.strip().lower().startswith("gpt-5")
-
-
 def _extract_message_text(message: Any) -> str:
     content = getattr(message, "content", "")
     if isinstance(content, str):
@@ -236,11 +232,7 @@ def _build_completion_kwargs(
     if not force_plain_json:
         completion_kwargs["response_format"] = {"type": "json_object"}
 
-    if _is_gpt5_model(model):
-        completion_kwargs["max_completion_tokens"] = 700
-    else:
-        completion_kwargs["temperature"] = 0.2
-        completion_kwargs["max_tokens"] = 700
+    completion_kwargs["max_completion_tokens"] = 700
 
     return completion_kwargs
 
@@ -341,7 +333,6 @@ async def judge_story(story: str, *, evidence_context: Sequence[str] | None = No
 
     user_prompt = _build_user_prompt(story, evidence_context)
     primary_model = settings.openai_model
-    reasons: list[str] = []
     data, reason = await _request_json_data(
         client,
         model=primary_model,
@@ -350,27 +341,6 @@ async def judge_story(story: str, *, evidence_context: Sequence[str] | None = No
     )
     if data:
         return _normalize_response(data, story)
-    if reason:
-        reasons.append(reason)
-
-    fallback_model = "gpt-4o-mini"
-    if primary_model != fallback_model:
-        logger.warning(
-            "Primary model failed to return parsable JSON. Trying fallback model | primary=%s | fallback=%s",
-            primary_model,
-            fallback_model,
-        )
-        fallback_data, fallback_reason = await _request_json_data(
-            client,
-            model=fallback_model,
-            user_prompt=user_prompt,
-            timeout_seconds=settings.openai_timeout_seconds,
-        )
-        if fallback_data:
-            return _normalize_response(fallback_data, story)
-        if fallback_reason:
-            reasons.append(fallback_reason)
-
-    if reasons and all(item == "call_error" for item in reasons):
+    if reason == "call_error":
         return _fallback_response(story, verdict="모델 호출에 실패했습니다. 잠시 후 다시 시도해 주세요.")
     return _fallback_response(story, verdict="모델 응답을 파싱하지 못했습니다. 잠시 후 다시 시도해 주세요.")
