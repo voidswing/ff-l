@@ -3,7 +3,9 @@ from sqlmodel import Session, select
 
 from src.core.db.connection import engine
 from src.feature.judge import service
+from src.feature.judge import router as judge_router_module
 from src.feature.judge.model import JudgeRequestLog
+from src.feature.judge.schemas import JudgmentResponse
 from src.feature.user.model import User
 from src.main import app
 
@@ -150,3 +152,50 @@ def test_judge_request_and_result_are_saved_to_database() -> None:
         assert row.story == "친구 카드로 결제했어요."
         assert row.result_json is not None
         assert row.completed_at is not None
+
+
+def test_judge_endpoint_schedules_slack_logs(monkeypatch) -> None:
+    events: list[str] = []
+
+    def fake_schedule(**kwargs):  # noqa: ANN003
+        events.append(str(kwargs.get("event")))
+
+    monkeypatch.setattr(judge_router_module, "_schedule_judge_slack_log", fake_schedule)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/judge",
+        headers={"X-USER-UDID": "1e9d0fc8-d992-4ca9-b648-33e0c8665f38"},
+        json={"story": "친구가 계속 놀려서 내가 때림"},
+    )
+
+    assert response.status_code == 200
+    assert events == ["received", "completed"]
+
+
+def test_judge_endpoint_marks_failed_when_model_call_fails(monkeypatch) -> None:
+    async def fake_judge_story(story: str, *, evidence_context=None):  # noqa: ANN001, ANN202
+        return JudgmentResponse(
+            summary="요약",
+            possible_crimes=[],
+            verdict="모델 호출에 실패했습니다. 잠시 후 다시 시도해 주세요.",
+            disclaimer="법률 자문이 아니며 참고용입니다.",
+        )
+
+    monkeypatch.setattr(judge_router_module, "judge_story", fake_judge_story)
+
+    client = TestClient(app)
+    udid = "6cbf65d5-73c2-432e-9eb4-aac4b6b647f1"
+    response = client.post(
+        "/api/judge",
+        headers={"X-USER-UDID": udid},
+        json={"story": "친구가 계속 놀려서 내가 때림"},
+    )
+
+    assert response.status_code == 200
+    with Session(engine) as session:
+        row = session.exec(select(JudgeRequestLog).where(JudgeRequestLog.user_udid == udid)).first()
+        assert row is not None
+        assert row.status == "failed"
+        assert row.error_message is not None
+        assert "모델 호출에 실패" in row.error_message

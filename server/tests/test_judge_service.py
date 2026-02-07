@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from io import BytesIO
 
 from fastapi import UploadFile
@@ -71,3 +72,49 @@ def test_build_evidence_context_allows_pdf_and_image() -> None:
     assert len(context) == 2
     assert "photo.jpg" in context[0]
     assert "document.pdf" in context[1]
+
+
+def test_judge_story_logs_model_call_failure_reason(monkeypatch, caplog) -> None:
+    class FailingCompletions:
+        async def create(self, **kwargs):  # noqa: ANN003
+            raise RuntimeError("upstream timeout")
+
+    class FakeChat:
+        def __init__(self) -> None:
+            self.completions = FailingCompletions()
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.chat = FakeChat()
+
+    monkeypatch.setattr(service, "_build_client", lambda: FakeClient())
+    caplog.set_level(logging.ERROR)
+
+    result = asyncio.run(service.judge_story("친구가 날 밀쳤다"))
+
+    assert "모델 호출에 실패했습니다" in result.verdict
+    assert "OpenAI model call failed" in caplog.text
+    assert "upstream timeout" in caplog.text
+
+
+def test_judge_story_logs_parse_failure_reason(monkeypatch, caplog) -> None:
+    class PassingCompletions:
+        async def create(self, **kwargs):  # noqa: ANN003
+            choice = type("Choice", (), {"message": type("Msg", (), {"content": "not-json"})()})()
+            return type("Resp", (), {"choices": [choice]})()
+
+    class FakeChat:
+        def __init__(self) -> None:
+            self.completions = PassingCompletions()
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.chat = FakeChat()
+
+    monkeypatch.setattr(service, "_build_client", lambda: FakeClient())
+    caplog.set_level(logging.ERROR)
+
+    result = asyncio.run(service.judge_story("친구가 날 밀쳤다"))
+
+    assert "모델 응답을 파싱하지 못했습니다" in result.verdict
+    assert "Failed to parse model response as JSON" in caplog.text

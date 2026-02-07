@@ -1,5 +1,6 @@
 import json
 import os
+import logging
 from collections.abc import Sequence
 from functools import lru_cache
 from typing import Any
@@ -15,6 +16,7 @@ SUMMARY_MAX_CHARS = 140
 EVIDENCE_MAX_FILES = 3
 EVIDENCE_MAX_FILE_BYTES = 8 * 1024 * 1024
 ALLOWED_EVIDENCE_EXTENSIONS = {"jpg", "jpeg", "png", "webp", "gif", "bmp", "heic", "heif", "pdf"}
+logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """
 너는 한국어로 답하는 'AI 판사'야.
@@ -209,6 +211,9 @@ async def judge_story(story: str, *, evidence_context: Sequence[str] | None = No
 
     client = _build_client()
     if client is None:
+        logger.warning(
+            "OpenAI client unavailable: OPENAI_API_KEY is not configured. Returning fallback response."
+        )
         return _fallback_response(story)
 
     user_prompt = _build_user_prompt(story, evidence_context)
@@ -225,12 +230,25 @@ async def judge_story(story: str, *, evidence_context: Sequence[str] | None = No
             max_tokens=700,
             timeout=settings.openai_timeout_seconds,
         )
-    except Exception:  # noqa: BLE001 - 외부 API 예외를 넓게 수용
+    except Exception as exc:  # noqa: BLE001 - 외부 API 예외를 넓게 수용
+        logger.exception(
+            "OpenAI model call failed | model=%s | timeout=%.1f | error_type=%s | error=%s",
+            settings.openai_model,
+            settings.openai_timeout_seconds,
+            type(exc).__name__,
+            str(exc),
+        )
         return _fallback_response(story, verdict="모델 호출에 실패했습니다. 잠시 후 다시 시도해 주세요.")
 
     content = response.choices[0].message.content or ""
     data = _safe_json_loads(content) or _extract_json(content)
     if not data:
+        preview = content[:240].replace("\n", "\\n")
+        logger.error(
+            "Failed to parse model response as JSON | model=%s | content_preview=%s",
+            settings.openai_model,
+            preview,
+        )
         return _fallback_response(story, verdict="모델 응답을 파싱하지 못했습니다. 잠시 후 다시 시도해 주세요.")
 
     return _normalize_response(data, story)

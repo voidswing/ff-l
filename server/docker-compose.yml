@@ -22,6 +22,8 @@ services:
       - DB_HOST=ff-postgres
       - DB_PORT=${DB_PORT:-5432}
       - DB_ECHO=${DB_ECHO:-false}
+      - SLACK_TOKEN=${SLACK_TOKEN:-}
+      - SLACK_LOG_CHANNEL=${SLACK_LOG_CHANNEL:-#l}
       - CORS_ALLOW_ORIGINS=${CORS_ALLOW_ORIGINS:-["*"]}
       - CORS_ALLOW_CREDENTIALS=${CORS_ALLOW_CREDENTIALS:-false}
     volumes:

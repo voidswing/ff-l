@@ -49,6 +49,8 @@ uv run uvicorn src.main:app --reload --host 0.0.0.0 --port 8000
 - `DB_PASSWORD` (기본값: `postgres`)
 - `DATABASE_URL` (지정 시 위 DB_* 값을 무시하고 우선 사용)
 - `DB_ECHO` (기본값: `false`)
+- `SLACK_TOKEN` (`judge` API 요청/완료/실패 로그 전송용)
+- `SLACK_LOG_CHANNEL` (기본값: `#l`)
 - `CORS_ALLOW_ORIGINS` (기본값: `["*"]`)
 - `CORS_ALLOW_CREDENTIALS` (기본값: `false`)
 

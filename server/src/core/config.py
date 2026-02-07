@@ -13,6 +13,8 @@ class Settings(BaseSettings):
     db_password: str = "postgres"
     database_url: str | None = None
     db_echo: bool = False
+    slack_token: str | None = None
+    slack_log_channel: str = "#l"
     cors_allow_origins: list[str] = ["*"]
     cors_allow_credentials: bool = False
 
