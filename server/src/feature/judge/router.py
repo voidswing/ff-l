@@ -179,6 +179,13 @@ async def judge(
         evidence_count=len(evidence_context),
         status="processing",
     )
+    logger.info(
+        "Judge request received | request_uuid=%s | udid=%s | story_length=%d | evidence_count=%d",
+        request_log.request_uuid,
+        udid,
+        len(payload.story),
+        len(evidence_context),
+    )
 
     try:
         result = await judge_story(payload.story, evidence_context=evidence_context)
@@ -202,6 +209,13 @@ async def judge(
             status=request_log.status,
             reason=request_log.error_message,
         )
+        logger.info(
+            "Judge request completed | request_uuid=%s | udid=%s | status=%s | verdict_preview=%s",
+            request_log.request_uuid,
+            udid,
+            request_log.status,
+            _shorten(result.verdict, 160),
+        )
         return result
     except Exception as exc:  # noqa: BLE001 - 판단 실패를 DB에 기록하기 위한 처리
         request_log.status = "failed"
@@ -217,5 +231,11 @@ async def judge(
             evidence_count=len(evidence_context),
             status="failed",
             reason=request_log.error_message,
+        )
+        logger.exception(
+            "Judge request failed with unhandled exception | request_uuid=%s | udid=%s | error=%s",
+            request_log.request_uuid,
+            udid,
+            str(exc),
         )
         raise

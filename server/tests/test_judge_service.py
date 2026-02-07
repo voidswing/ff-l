@@ -218,3 +218,59 @@ def test_judge_story_does_not_use_secondary_model_when_gpt5_returns_empty(monkey
     assert models[0] == "gpt-5.2"
     assert models[1] == "gpt-5.2"
     assert all(model == "gpt-5.2" for model in models)
+
+
+def test_resolve_openai_model_replaces_nano_with_gpt52() -> None:
+    assert service._resolve_openai_model("gpt-5-nano") == "gpt-5.2"
+    assert service._resolve_openai_model("gpt-5.2") == "gpt-5.2"
+    assert service._resolve_openai_model("") == "gpt-5.2"
+
+
+def test_retry_uses_higher_max_tokens_when_length_and_empty(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    class LengthThenJsonCompletions:
+        async def create(self, **kwargs):  # noqa: ANN003
+            calls.append(kwargs)
+            if len(calls) == 1:
+                choice = type(
+                    "Choice",
+                    (),
+                    {
+                        "message": type("Msg", (), {"content": ""})(),
+                        "finish_reason": "length",
+                    },
+                )()
+                return type("Resp", (), {"choices": [choice]})()
+            choice = type(
+                "Choice",
+                (),
+                {
+                    "message": type(
+                        "Msg",
+                        (),
+                        {
+                            "content": "{\"summary\":\"요약\",\"possible_crimes\":[],\"verdict\":\"판단\",\"disclaimer\":\"법률 자문이 아닙니다.\"}"
+                        },
+                    )(),
+                    "finish_reason": "stop",
+                },
+            )()
+            return type("Resp", (), {"choices": [choice]})()
+
+    class FakeChat:
+        def __init__(self) -> None:
+            self.completions = LengthThenJsonCompletions()
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.chat = FakeChat()
+
+    monkeypatch.setattr(service, "_build_client", lambda: FakeClient())
+
+    result = asyncio.run(service.judge_story("친구가 날 밀쳤다"))
+
+    assert result.summary == "요약"
+    assert len(calls) == 2
+    assert calls[0]["max_completion_tokens"] == service.DEFAULT_MAX_COMPLETION_TOKENS
+    assert calls[1]["max_completion_tokens"] == service.LENGTH_RETRY_MAX_COMPLETION_TOKENS

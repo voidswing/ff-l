@@ -15,6 +15,8 @@ from src.feature.judge.schemas import JudgmentResponse
 SUMMARY_MAX_CHARS = 140
 EVIDENCE_MAX_FILES = 3
 EVIDENCE_MAX_FILE_BYTES = 8 * 1024 * 1024
+DEFAULT_MAX_COMPLETION_TOKENS = 700
+LENGTH_RETRY_MAX_COMPLETION_TOKENS = 1400
 ALLOWED_EVIDENCE_EXTENSIONS = {"jpg", "jpeg", "png", "webp", "gif", "bmp", "heic", "heif", "pdf"}
 logger = logging.getLogger(__name__)
 
@@ -214,12 +216,39 @@ def _extract_message_text(message: Any) -> str:
     return ""
 
 
+def _resolve_openai_model(model: str | None) -> str:
+    normalized = (model or "").strip()
+    if not normalized:
+        return "gpt-5.2"
+    if "nano" in normalized.lower():
+        logger.warning(
+            "Blocked nano model configuration | configured_model=%s | fallback_model=gpt-5.2",
+            normalized,
+        )
+        return "gpt-5.2"
+    return normalized
+
+
+def _extract_usage_details(response: Any) -> tuple[int | None, int | None, int | None, int | None]:
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return None, None, None, None
+
+    prompt_tokens = getattr(usage, "prompt_tokens", None)
+    completion_tokens = getattr(usage, "completion_tokens", None)
+    total_tokens = getattr(usage, "total_tokens", None)
+    completion_details = getattr(usage, "completion_tokens_details", None)
+    reasoning_tokens = getattr(completion_details, "reasoning_tokens", None) if completion_details else None
+    return prompt_tokens, completion_tokens, total_tokens, reasoning_tokens
+
+
 def _build_completion_kwargs(
     *,
     model: str,
     user_prompt: str,
     timeout_seconds: float,
     force_plain_json: bool = False,
+    max_completion_tokens: int = DEFAULT_MAX_COMPLETION_TOKENS,
 ) -> dict[str, Any]:
     completion_kwargs: dict[str, Any] = {
         "model": model,
@@ -228,11 +257,10 @@ def _build_completion_kwargs(
             {"role": "user", "content": user_prompt},
         ],
         "timeout": timeout_seconds,
+        "max_completion_tokens": max_completion_tokens,
     }
     if not force_plain_json:
         completion_kwargs["response_format"] = {"type": "json_object"}
-
-    completion_kwargs["max_completion_tokens"] = 700
 
     return completion_kwargs
 
@@ -248,6 +276,7 @@ async def _request_json_data(
         model=model,
         user_prompt=user_prompt,
         timeout_seconds=timeout_seconds,
+        max_completion_tokens=DEFAULT_MAX_COMPLETION_TOKENS,
     )
     try:
         response = await client.chat.completions.create(**first_kwargs)
@@ -261,26 +290,68 @@ async def _request_json_data(
         )
         return None, "call_error"
 
-    message = response.choices[0].message
+    choices = getattr(response, "choices", None) or []
+    if not choices:
+        logger.error(
+            "OpenAI response has no choices | model=%s | response_id=%s",
+            model,
+            getattr(response, "id", None),
+        )
+        return None, "parse_error"
+
+    first_choice = choices[0]
+    message = first_choice.message
     content = _extract_message_text(message)
     data = _safe_json_loads(content) or _extract_json(content)
     if data:
+        prompt_tokens, completion_tokens, total_tokens, reasoning_tokens = _extract_usage_details(response)
+        logger.info(
+            "Parsed OpenAI JSON response | model=%s | attempt=first | response_id=%s | finish_reason=%s | content_length=%d | prompt_tokens=%s | completion_tokens=%s | total_tokens=%s | reasoning_tokens=%s",
+            model,
+            getattr(response, "id", None),
+            getattr(first_choice, "finish_reason", None),
+            len(content),
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+            reasoning_tokens,
+        )
         return data, None
 
     preview = content[:240].replace("\n", "\\n")
+    prompt_tokens, completion_tokens, total_tokens, reasoning_tokens = _extract_usage_details(response)
+    first_finish_reason = getattr(first_choice, "finish_reason", None)
     refusal = getattr(message, "refusal", None)
     logger.error(
-        "Failed to parse model response as JSON (first try) | model=%s | content_preview=%s | refusal=%s",
+        "Failed to parse model response as JSON (first try) | model=%s | response_id=%s | finish_reason=%s | content_length=%d | content_preview=%s | refusal=%s | prompt_tokens=%s | completion_tokens=%s | total_tokens=%s | reasoning_tokens=%s",
         model,
+        getattr(response, "id", None),
+        first_finish_reason,
+        len(content),
         preview,
         str(refusal),
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+        reasoning_tokens,
     )
+
+    retry_max_tokens = DEFAULT_MAX_COMPLETION_TOKENS
+    if first_finish_reason == "length" and not content.strip():
+        retry_max_tokens = LENGTH_RETRY_MAX_COMPLETION_TOKENS
+        logger.warning(
+            "Retrying OpenAI call with higher max_completion_tokens after empty length-limited response | model=%s | previous_max_completion_tokens=%d | retry_max_completion_tokens=%d",
+            model,
+            DEFAULT_MAX_COMPLETION_TOKENS,
+            retry_max_tokens,
+        )
 
     retry_kwargs = _build_completion_kwargs(
         model=model,
         user_prompt=user_prompt,
         timeout_seconds=timeout_seconds,
         force_plain_json=True,
+        max_completion_tokens=retry_max_tokens,
     )
     try:
         retry_response = await client.chat.completions.create(**retry_kwargs)
@@ -293,19 +364,53 @@ async def _request_json_data(
         )
         return None, "call_error"
 
-    retry_message = retry_response.choices[0].message
+    retry_choices = getattr(retry_response, "choices", None) or []
+    if not retry_choices:
+        logger.error(
+            "OpenAI retry response has no choices | model=%s | response_id=%s",
+            model,
+            getattr(retry_response, "id", None),
+        )
+        return None, "parse_error"
+
+    retry_choice = retry_choices[0]
+    retry_message = retry_choice.message
     retry_content = _extract_message_text(retry_message)
     retry_data = _safe_json_loads(retry_content) or _extract_json(retry_content)
     if retry_data:
+        retry_prompt_tokens, retry_completion_tokens, retry_total_tokens, retry_reasoning_tokens = _extract_usage_details(
+            retry_response
+        )
+        logger.info(
+            "Parsed OpenAI JSON response | model=%s | attempt=retry | response_id=%s | finish_reason=%s | content_length=%d | prompt_tokens=%s | completion_tokens=%s | total_tokens=%s | reasoning_tokens=%s",
+            model,
+            getattr(retry_response, "id", None),
+            getattr(retry_choice, "finish_reason", None),
+            len(retry_content),
+            retry_prompt_tokens,
+            retry_completion_tokens,
+            retry_total_tokens,
+            retry_reasoning_tokens,
+        )
         return retry_data, None
 
     retry_preview = retry_content[:240].replace("\n", "\\n")
+    retry_prompt_tokens, retry_completion_tokens, retry_total_tokens, retry_reasoning_tokens = _extract_usage_details(
+        retry_response
+    )
     retry_refusal = getattr(retry_message, "refusal", None)
     logger.error(
-        "Failed to parse model response as JSON (retry) | model=%s | content_preview=%s | refusal=%s",
+        "Failed to parse model response as JSON (retry) | model=%s | response_id=%s | finish_reason=%s | content_length=%d | content_preview=%s | refusal=%s | prompt_tokens=%s | completion_tokens=%s | total_tokens=%s | reasoning_tokens=%s",
         model,
+        getattr(retry_response, "id", None),
+        getattr(retry_choice, "finish_reason", None),
+        len(retry_content),
         retry_preview,
         str(retry_refusal),
+        retry_prompt_tokens,
+        retry_completion_tokens,
+        retry_total_tokens,
+        retry_reasoning_tokens,
     )
     return None, "parse_error"
 
@@ -332,7 +437,14 @@ async def judge_story(story: str, *, evidence_context: Sequence[str] | None = No
         return _fallback_response(story)
 
     user_prompt = _build_user_prompt(story, evidence_context)
-    primary_model = settings.openai_model
+    primary_model = _resolve_openai_model(settings.openai_model)
+    logger.info(
+        "Starting model judgment request | model=%s | timeout=%.1f | prompt_length=%d | evidence_count=%d",
+        primary_model,
+        settings.openai_timeout_seconds,
+        len(user_prompt),
+        len(evidence_context or []),
+    )
     data, reason = await _request_json_data(
         client,
         model=primary_model,
